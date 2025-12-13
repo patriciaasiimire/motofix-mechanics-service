@@ -1,55 +1,131 @@
 # app/routers/mechanics.py
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from typing import List
-from app import models, schemas, database
+from pydantic import BaseModel
+import asyncpg
 
 router = APIRouter(prefix="/mechanics", tags=["Mechanics"])
 
+# ────────────────────────────── SCHEMAS ──────────────────────────────
 
-@router.post("/", response_model=schemas.Mechanic)
-def create(mechanic: schemas.MechanicCreate, db: Session = Depends(database.get_db)):
-    db_m = models.Mechanic(**mechanic.dict())
-    db.add(db_m)
-    db.commit()
-    db.refresh(db_m)
-    return db_m
-
-
-@router.get("/", response_model=List[schemas.Mechanic])
-def read_all(db: Session = Depends(database.get_db)):
-    return db.query(models.Mechanic).all()
+class MechanicBase(BaseModel):
+    phone: str
+    name: str
+    location: str | None = None
+    is_verified: bool = False
+    rating: int = 0
+    jobs_completed: int = 0
 
 
-@router.get("/{mechanic_id}", response_model=schemas.Mechanic)
-def read_one(mechanic_id: int, db: Session = Depends(database.get_db)):
-    m = db.query(models.Mechanic).filter(models.Mechanic.id == mechanic_id).first()
-    if not m:
-        raise HTTPException(404, "Mechanic not found")
-    return m
+class MechanicCreate(MechanicBase):
+    pass
 
 
-@router.patch("/{mechanic_id}", response_model=schemas.Mechanic)
-def update(mechanic_id: int, update: schemas.MechanicUpdate, db: Session = Depends(database.get_db)):
-    m = db.query(models.Mechanic).filter(models.Mechanic.id == mechanic_id).first()
-    if not m:
-        raise HTTPException(404, "Mechanic not found")
+class MechanicUpdate(BaseModel):
+    phone: str | None = None
+    name: str | None = None
+    location: str | None = None
+    is_verified: bool | None = None
+    rating: int | None = None
+    jobs_completed: int | None = None
 
+
+class Mechanic(MechanicBase):
+    id: int
+
+    class Config:
+        from_attributes = True  # For Pydantic v2 compatibility
+
+
+# ────────────────────────────── DEPENDENCY ──────────────────────────────
+
+async def get_db() -> asyncpg.Connection:
+    from ..main import pool  # Import pool from main.py
+    async with pool.acquire() as conn:
+        yield conn
+
+
+# ────────────────────────────── ENDPOINTS ──────────────────────────────
+
+@router.post("/", response_model=Mechanic)
+async def create(mechanic: MechanicCreate, db: asyncpg.Connection = Depends(get_db)):
+    query = """
+        INSERT INTO mechanics (phone, name, location, is_verified, rating, jobs_completed)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, phone, name, location, is_verified, rating, jobs_completed
+    """
+    result = await db.fetchrow(
+        query,
+        mechanic.phone,
+        mechanic.name,
+        mechanic.location,
+        mechanic.is_verified,
+        mechanic.rating,
+        mechanic.jobs_completed
+    )
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to create mechanic")
+    return dict(result)
+
+
+@router.get("/", response_model=List[Mechanic])
+async def read_all(db: asyncpg.Connection = Depends(get_db)):
+    query = """
+        SELECT id, phone, name, location, is_verified, rating, jobs_completed
+        FROM mechanics
+        ORDER BY id DESC
+    """
+    rows = await db.fetch(query)
+    return [dict(r) for r in rows]
+
+
+@router.get("/{mechanic_id}", response_model=Mechanic)
+async def read_one(mechanic_id: int, db: asyncpg.Connection = Depends(get_db)):
+    query = """
+        SELECT id, phone, name, location, is_verified, rating, jobs_completed
+        FROM mechanics
+        WHERE id = $1
+    """
+    result = await db.fetchrow(query, mechanic_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Mechanic not found")
+    return dict(result)
+
+
+@router.patch("/{mechanic_id}", response_model=Mechanic)
+async def update(
+    mechanic_id: int,
+    update: MechanicUpdate,
+    db: asyncpg.Connection = Depends(get_db)
+):
     data = update.dict(exclude_unset=True)
-    for key, value in data.items():
-        setattr(m, key, value)
+    if not data:
+        raise HTTPException(status_code=400, detail="No fields to update")
 
-    db.commit()
-    db.refresh(m)
-    return m
+    set_parts = []
+    values = []
+    for idx, (key, value) in enumerate(data.items(), start=1):
+        set_parts.append(f"{key} = ${idx}")
+        values.append(value)
+
+    values.append(mechanic_id)
+    query = f"""
+        UPDATE mechanics
+        SET {', '.join(set_parts)}
+        WHERE id = ${len(values)}
+        RETURNING id, phone, name, location, is_verified, rating, jobs_completed
+    """
+    result = await db.fetchrow(query, *values)
+    if not result:
+        raise HTTPException(status_code=404, detail="Mechanic not found")
+    return dict(result)
 
 
-@router.delete("/{mechanic_id}", response_model=schemas.Mechanic)
-def delete(mechanic_id: int, db: Session = Depends(database.get_db)):
-    m = db.query(models.Mechanic).filter(models.Mechanic.id == mechanic_id).first()
-    if not m:
-        raise HTTPException(404, "Mechanic not found")
-    db.delete(m)
-    db.commit()
-    return m
+@router.delete("/{mechanic_id}")
+async def delete(mechanic_id: int, db: asyncpg.Connection = Depends(get_db)):
+    query = "DELETE FROM mechanics WHERE id = $1 RETURNING id"
+    result = await db.fetchrow(query, mechanic_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Mechanic not found")
+    return {"detail": "Mechanic deleted successfully"}
