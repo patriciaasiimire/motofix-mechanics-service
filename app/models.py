@@ -1,3 +1,5 @@
+# motfix-mechanic-service: app/models.py
+
 from sqlalchemy import Column, Integer, String, Float, Boolean
 from .database import Base
 
