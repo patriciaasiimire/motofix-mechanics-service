@@ -1,4 +1,4 @@
-# app/main.py
+# motofix-mechanics-service: app/main.py
 
 import os
 from fastapi import FastAPI
